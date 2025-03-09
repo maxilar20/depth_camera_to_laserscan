@@ -1,5 +1,5 @@
-import cProfile
 import math
+import threading
 import time
 from pathlib import Path
 
@@ -13,46 +13,129 @@ from obstacle_detector import CreatureDetector
 from pointcloud_processor import PointCloudProcessor
 
 
-class PointcloudViewer:
+class SharedData:
+    """Thread-safe container for data shared between threads"""
+
+    def __init__(self):
+        # Data storage
+        self._rgb_frame = None
+        self._depth_frame = None
+        self._pointcloud = None
+        self._pointcloud_world = None
+        self._laserscan = None
+        self._slowdown_flag = False
+        self._detections = []
+
+        # Thread synchronization
+        self._rgb_depth_lock = threading.Lock()
+        self._pointcloud_lock = threading.Lock()
+        self._pointcloud_world_lock = threading.Lock()
+        self._laserscan_lock = threading.Lock()
+        self._slowdown_lock = threading.Lock()
+        self._detections_lock = threading.Lock()
+
+        # Control flags
+        self.stop_flag = False
+        self.new_frame_event = threading.Event()
+        self.new_pointcloud_event = threading.Event()
+
+    # RGB-Depth frame methods
+    def set_frames(self, rgb_frame, depth_frame):
+        with self._rgb_depth_lock:
+            self._rgb_frame = rgb_frame.copy() if rgb_frame is not None else None
+            self._depth_frame = depth_frame.copy() if depth_frame is not None else None
+        self.new_frame_event.set()
+
+    def get_frames(self):
+        with self._rgb_depth_lock:
+            if self._rgb_frame is None or self._depth_frame is None:
+                return None, None
+            return self._rgb_frame.copy(), self._depth_frame.copy()
+
+    # Pointcloud methods
+    def set_pointcloud(self, pointcloud):
+        with self._pointcloud_lock:
+            self._pointcloud = pointcloud
+        self.new_pointcloud_event.set()
+
+    def get_pointcloud(self):
+        with self._pointcloud_lock:
+            return self._pointcloud
+
+    # World pointcloud methods
+    def set_pointcloud_world(self, pointcloud_world):
+        with self._pointcloud_world_lock:
+            self._pointcloud_world = pointcloud_world
+
+    def get_pointcloud_world(self):
+        with self._pointcloud_world_lock:
+            return self._pointcloud_world
+
+    # Laserscan methods
+    def set_laserscan(self, laserscan):
+        with self._laserscan_lock:
+            self._laserscan = laserscan
+
+    def get_laserscan(self):
+        with self._laserscan_lock:
+            if self._laserscan is None:
+                return None
+            return self._laserscan.copy()
+
+    # Slowdown flag methods
+    def set_slowdown(self, slowdown):
+        with self._slowdown_lock:
+            self._slowdown_flag = slowdown
+
+    def get_slowdown(self):
+        with self._slowdown_lock:
+            return self._slowdown_flag
+
+    # Detections methods
+    def set_detections(self, detections):
+        with self._detections_lock:
+            self._detections = detections
+
+    def get_detections(self):
+        with self._detections_lock:
+            return self._detections.copy()
+
+
+class ThreadedSystem:
     def __init__(
         self,
         camera_stream,
         pointcloud_processor,
         creature_detector,
-        window_name="Live Stream",
+        window_name="Multi-threaded Stream",
     ):
         self.camera_stream = camera_stream
         self.pointcloud_processor = pointcloud_processor
         self.creature_detector = creature_detector
         self.window_name = window_name
-        self.stopped = False
 
-        # Camera pose parameters - updated to align camera properly
+        # Shared data between threads
+        self.shared_data = SharedData()
+
+        # Camera pose parameters
         self.camera_position = {
-            "x": 0.0,  # Camera position along x-axis (meters)
-            "y": 0.0,  # Camera position along y-axis (meters)
-            "z": 0.0,  # Camera height above ground (meters)
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
         }
-
         self.camera_orientation = {
-            "yaw": 0,  # Rotation around vertical axis (degrees)
-            "pitch": -90,  # Rotation around lateral axis (degrees)
-            "roll": 0,  # Rotation around longitudinal axis (degrees)
+            "yaw": 0,
+            "pitch": -90,
+            "roll": 0,
         }
-
-        # Build the transformation matrix
         self.camera_to_world = self._build_transformation_matrix()
+
+        # Thread objects
+        self.threads = []
 
     def _build_transformation_matrix(self):
         """
         Build a 4x4 transformation matrix to convert points from camera frame to world frame.
-
-        The transformation includes:
-        1. Rotation defined by yaw, pitch, roll angles
-        2. Translation defined by x, y, z coordinates
-
-        Returns:
-            4x4 numpy array representing the transformation matrix
         """
         # Convert angles from degrees to radians
         yaw_rad = math.radians(self.camera_orientation["yaw"])
@@ -64,8 +147,7 @@ class PointcloudViewer:
         y = self.camera_position["y"]
         z = self.camera_position["z"]
 
-        # Rotation matrices (using right-hand rule)
-        # Yaw rotation (around z-axis)
+        # Rotation matrices
         R_yaw = np.array(
             [
                 [np.cos(yaw_rad), -np.sin(yaw_rad), 0],
@@ -73,8 +155,6 @@ class PointcloudViewer:
                 [0, 0, 1],
             ]
         )
-
-        # Pitch rotation (around y-axis)
         R_pitch = np.array(
             [
                 [np.cos(pitch_rad), 0, np.sin(pitch_rad)],
@@ -82,8 +162,6 @@ class PointcloudViewer:
                 [-np.sin(pitch_rad), 0, np.cos(pitch_rad)],
             ]
         )
-
-        # Roll rotation (around x-axis)
         R_roll = np.array(
             [
                 [1, 0, 0],
@@ -96,43 +174,267 @@ class PointcloudViewer:
         R_combined = R_yaw @ R_pitch @ R_roll
 
         # Build full transformation matrix
-        transform = np.eye(4)  # Start with identity matrix
-        transform[:3, :3] = R_combined  # Set rotation part
-        transform[:3, 3] = [x, y, z]  # Set translation part
+        transform = np.eye(4)
+        transform[:3, :3] = R_combined
+        transform[:3, 3] = [x, y, z]
 
         return transform
 
-    def transform_pointcloud_to_world(self, pointcloud):
-        """
-        Transform a pointcloud from camera coordinates to world coordinates using open3d functions
+    def camera_thread_function(self):
+        """Thread for camera image acquisition"""
+        print("Camera thread starting...")
 
-        Args:
-            pointcloud: Open3D pointcloud in camera frame
+        # Wait for camera to warm up
+        time.sleep(1.0)
 
-        Returns:
-            Open3D pointcloud in world frame
-        """
+        while not self.shared_data.stop_flag:
+            # Get the latest RGBD frame
+            rgb_frame, depth_frame = self.camera_stream.read_rgbd()
 
-        # Apply the transformation matrix
-        pointcloud.transform(self.camera_to_world)
+            # Check if frames are valid
+            if rgb_frame is None or depth_frame is None:
+                print("Warning: Empty frame received from camera")
+                time.sleep(0.01)
+                continue
 
-        return pointcloud
+            # Store frames in shared data
+            self.shared_data.set_frames(rgb_frame, depth_frame)
+
+            # Sleep briefly to avoid maxing out CPU
+            time.sleep(0.01)
+
+        print("Camera thread stopped")
+
+    def pointcloud_thread_function(self):
+        """Thread for pointcloud generation"""
+        print("Pointcloud thread starting...")
+
+        while not self.shared_data.stop_flag:
+            # Wait for a new frame
+            if not self.shared_data.new_frame_event.wait(timeout=0.1):
+                continue
+
+            # Clear the event
+            self.shared_data.new_frame_event.clear()
+
+            # Get frames
+            rgb_frame, depth_frame = self.shared_data.get_frames()
+
+            if rgb_frame is None or depth_frame is None:
+                continue
+
+            # Process frames to create pointcloud (in camera coordinates)
+            pointcloud = self.pointcloud_processor.process_rgbd_image(
+                rgb_frame, depth_frame
+            )
+
+            # Store pointcloud in shared data
+            self.shared_data.set_pointcloud(pointcloud)
+
+            # Transform pointcloud from camera to world coordinates
+            pointcloud_copy = o3d.geometry.PointCloud(pointcloud)
+            pointcloud_world = pointcloud_copy.transform(self.camera_to_world)
+
+            # Store world-frame pointcloud in shared data
+            self.shared_data.set_pointcloud_world(pointcloud_world)
+
+        print("Pointcloud thread stopped")
+
+    def laserscan_thread_function(self):
+        """Thread for laserscan generation"""
+        print("Laserscan thread starting...")
+
+        while not self.shared_data.stop_flag:
+            # Wait for a new pointcloud
+            if not self.shared_data.new_pointcloud_event.wait(timeout=0.1):
+                continue
+
+            # Clear the event
+            self.shared_data.new_pointcloud_event.clear()
+
+            # Get pointcloud in world frame
+            pointcloud_world = self.shared_data.get_pointcloud_world()
+
+            if pointcloud_world is None:
+                continue
+
+            # Generate laser scan
+            laser_scan = self.get_laserscan(
+                pointcloud_world, num_beams=36, max_range=3.0, angle_range=180
+            )
+
+            # Store laser scan in shared data
+            self.shared_data.set_laserscan(laser_scan)
+
+        print("Laserscan thread stopped")
+
+    def slowdown_thread_function(self):
+        """Thread for slowdown flag calculation"""
+        print("Slowdown thread starting...")
+
+        while not self.shared_data.stop_flag:
+            # Get pointcloud in world frame
+            pointcloud_world = self.shared_data.get_pointcloud_world()
+
+            if pointcloud_world is None:
+                time.sleep(0.1)
+                continue
+
+            # Calculate slowdown flag
+            slowdown = self.get_slowdown(pointcloud_world)
+
+            # Store slowdown flag in shared data
+            self.shared_data.set_slowdown(slowdown)
+
+            # Sleep briefly to avoid constant recalculation
+            time.sleep(0.1)
+
+        print("Slowdown thread stopped")
+
+    def detection_thread_function(self):
+        """Thread for creature detection"""
+        print("Detection thread starting...")
+
+        while not self.shared_data.stop_flag:
+            # Get frames
+            rgb_frame, depth_frame = self.shared_data.get_frames()
+
+            if rgb_frame is None or depth_frame is None:
+                time.sleep(0.1)
+                continue
+
+            # Detect creatures
+            detections = self.creature_detector.detect(rgb_frame, depth_frame)
+
+            # Store detections in shared data
+            self.shared_data.set_detections(detections)
+
+            # Sleep to limit detection rate (creature detection is expensive)
+            time.sleep(0.1)
+
+        print("Detection thread stopped")
+
+    def visualization_thread_function(self):
+        """Thread for visualization"""
+        print("Visualization thread starting...")
+
+        # Create Open3D visualizer
+        vis = o3d.visualization.Visualizer()
+        vis.create_window(window_name=self.window_name)
+
+        # Track the geometries we've added to the visualizer
+        last_pointcloud = None
+
+        try:
+            while not self.shared_data.stop_flag:
+                # Get all data for visualization
+                pointcloud_world = self.shared_data.get_pointcloud_world()
+                laser_scan = self.shared_data.get_laserscan()
+                detections = self.shared_data.get_detections()
+                slowdown = self.shared_data.get_slowdown()
+
+                # Clear the visualizer for new frame
+                vis.clear_geometries()
+
+                # Add a coordinate frame
+                coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+                    size=0.5
+                )
+                vis.add_geometry(coord_frame)
+
+                # Add pointcloud if available
+                if pointcloud_world is not None:
+                    vis.add_geometry(pointcloud_world)
+                    last_pointcloud = pointcloud_world
+
+                # Add laser scan if available
+                if laser_scan is not None:
+                    self.visualize_laser_scan(vis, laser_scan)
+
+                # Visualize detections if available
+                if detections:
+                    self.visualize_creatures(vis, detections)
+
+                # Show slowdown indicator
+                if slowdown:
+                    slowdown_sphere = o3d.geometry.TriangleMesh.create_sphere(
+                        radius=0.1
+                    )
+                    slowdown_sphere.paint_uniform_color([1, 0, 0])  # Red for slowdown
+                    slowdown_sphere.translate([0, 0.5, 0])  # Position above origin
+                    vis.add_geometry(slowdown_sphere)
+
+                # Set camera view position
+                ctr = vis.get_view_control()
+                ctr.set_lookat([0, 0, 0])
+                ctr.set_front([0, 1, 0])  # Top-down view
+                ctr.set_up([0, 0, 1])
+
+                # Update visualization
+                vis.poll_events()
+                vis.update_renderer()
+
+                # Check for user input (q to quit)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    self.shared_data.stop_flag = True
+                    break
+
+                # Sleep briefly to limit refresh rate
+                time.sleep(0.03)
+
+        finally:
+            vis.destroy_window()
+            print("Visualization thread stopped")
+
+    def start_threads(self):
+        """Start all processing threads"""
+        self.threads = []
+
+        # Create and start all threads
+        self.threads.append(
+            threading.Thread(target=self.camera_thread_function, daemon=True)
+        )
+        self.threads.append(
+            threading.Thread(target=self.pointcloud_thread_function, daemon=True)
+        )
+        self.threads.append(
+            threading.Thread(target=self.laserscan_thread_function, daemon=True)
+        )
+        self.threads.append(
+            threading.Thread(target=self.slowdown_thread_function, daemon=True)
+        )
+        self.threads.append(
+            threading.Thread(target=self.detection_thread_function, daemon=True)
+        )
+        self.threads.append(
+            threading.Thread(target=self.visualization_thread_function, daemon=True)
+        )
+
+        for thread in self.threads:
+            thread.start()
+
+        # Wait for stop flag or keyboard interrupt
+        try:
+            while not self.shared_data.stop_flag:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("Keyboard interrupt received. Stopping threads...")
+            self.shared_data.stop_flag = True
+
+        # Wait for all threads to finish
+        for thread in self.threads:
+            thread.join(timeout=1.0)
+
+        # Clean up camera resources
+        if hasattr(self.camera_stream, "stop"):
+            self.camera_stream.stop()
+            print("Camera resources released")
 
     def get_slowdown(
         self, pointcloud, max_range=1.5, z_range=(-0.35, 0.35), y_range=(-0.1, 0.1)
     ):
-        """
-        Generate a boolean slowdown flag based on the minimum distance to obstacles in the x direction
-
-        Args:
-            pointcloud: Open3D pointcloud in world frame
-            max_range: Maximum range of the slowdown map
-            z_range: Range of Z values to consider (min, max)
-            y_range: Range of Y values to consider (min, max)
-
-        Returns:
-            boolean representing the slowdown flag
-        """
+        """Generate a boolean slowdown flag based on the minimum distance to obstacles"""
         # Get points as numpy array
         points = np.asarray(pointcloud.points)
 
@@ -158,36 +460,18 @@ class PointcloudViewer:
         # Calculate distances in the X direction
         distances = filtered_points[:, 0]
 
-        # Filter points within max_range
-        range_mask = distances <= max_range
-        distances = distances[range_mask]
-
-        if len(distances) == 0:
-            return False
-
-        return True
+        # Check if any point is within max_range
+        return np.any(distances <= max_range)
 
     def get_laserscan(
         self,
         pointcloud,
         num_beams=360,
         max_range=3.0,
-        angle_range=180,  # Changed to 180 degrees for wider coverage
-        height_range=(-0.1, 0.1),  # Narrower height range to focus on a plane
+        angle_range=180,
+        height_range=(-0.1, 0.1),
     ):
-        """
-        Generate a 2D laser scan from a 3D point cloud using vectorized operations
-
-        Args:
-            pointcloud: Open3D pointcloud in world frame
-            num_beams: Number of laser beams to simulate
-            max_range: Maximum range of the laser scan
-            angle_range: Total angular range in degrees
-            height_range: Range of heights to consider (min, max) along Y-axis
-
-        Returns:
-            1D numpy array representing the laser scan distances
-        """
+        """Generate a 2D laser scan from a 3D point cloud"""
         # Get points as numpy array
         points = np.asarray(pointcloud.points)
 
@@ -243,15 +527,7 @@ class PointcloudViewer:
         return laser_scan
 
     def visualize_laser_scan(self, vis, laser_scan, angle_range=180, max_range=3.0):
-        """
-        Visualize the laser scan as lines in the 3D scene
-
-        Args:
-            vis: Open3D visualizer
-            laser_scan: Laser scan distances
-            angle_range: Total angular range in degrees
-            max_range: Maximum range of the laser scan
-        """
+        """Visualize the laser scan as lines in the 3D scene"""
         num_beams = len(laser_scan)
         min_angle = -angle_range / 2
         max_angle = angle_range / 2
@@ -294,131 +570,28 @@ class PointcloudViewer:
 
         vis.add_geometry(line_set)
 
-        return line_set
-
     def visualize_creatures(self, vis, detections):
-        """
-        Visualize the detected creatures as bounding boxes in the 3D scene
-
-        Args:
-            vis: Open3D visualizer
-            detections: List of detected creatures
-        """
-        # Create a line set for visualization
-        points = []
-        lines = []
-        colors = []
-
+        """Visualize the detected creatures in the 3D scene"""
         # For each detected creature
         for detection in detections:
-            box = detection["box"]
             position = detection["position"]
 
-            # Calculate the center of the bounding box
-            center_x = (box[0] + box[2]) // 2
-            center_y = (box[1] + box[3]) // 2
+            # Add sphere at the position of the detection
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
+            sphere.compute_vertex_normals()
 
-            # Add the center point
-            points.append([position["x"], position["y"], position["z"]])
-
-            # Add a line from the center to the top of the bounding box
-            lines.append([len(points) - 1, len(points)])
-            points.append([position["x"], position["y"], position["z"] + 0.1])
+            # Position sphere at detection location
+            sphere.translate([position["z"], 0, position["x"]])
 
             # Color based on class
             if detection["class"] == "person":
-                colors.append([1, 0, 0])
+                sphere.paint_uniform_color([1, 0, 0])  # Red for person
             elif detection["class"] == "dog":
-                colors.append([0, 1, 0])
+                sphere.paint_uniform_color([0, 1, 0])  # Green for dog
             else:
-                colors.append([0, 0, 1])
+                sphere.paint_uniform_color([0, 0, 1])  # Blue for other creatures
 
-            # Add sphere at the center of the bounding box
-            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
-            sphere.compute_vertex_normals()
-            sphere.translate([position["z"], 0, position["x"]])
-            sphere.paint_uniform_color([0.5, 0.5, 0.5])
             vis.add_geometry(sphere)
-
-    def start_display(self):
-        """Display the camera stream in an Open3D window until 'q' is pressed or Ctrl+C is received"""
-        # Allow the camera sensor to warm up
-        time.sleep(2.0)
-
-        # Create Open3D visualizer
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(window_name=self.window_name)
-
-        try:
-            # Keep looping until 'q' is pressed
-            while not self.stopped:
-                self.update_display(vis)
-        except KeyboardInterrupt:
-            print("Keyboard interrupt received. Stopping display.")
-            self.stop_display()
-        finally:
-            # Clean up resources
-            if hasattr(self.camera_stream, "stop"):
-                self.camera_stream.stop()
-            vis.destroy_window()
-            print("Camera resources released")
-
-    def update_display(self, vis):
-        # Get the latest frame (RGBD)
-        rgb_frame, depth_frame = self.camera_stream.read_rgbd()
-
-        # Check if frames are valid
-        if rgb_frame is None or depth_frame is None:
-            print("Error: Empty frame received from the camera.")
-            return  # Skip this iteration if frames are invalid
-
-        vis.clear_geometries()
-
-        # Detect creatures in the pointcloud
-        detections = self.creature_detector.detect(rgb_frame, depth_frame)
-        self.visualize_creatures(vis, detections)
-
-        # Process frames to create pointcloud (in camera coordinates)
-        pointcloud = self.pointcloud_processor.process_rgbd_image(
-            rgb_frame, depth_frame
-        )
-        pointcloud_world = self.transform_pointcloud_to_world(pointcloud)
-        vis.add_geometry(pointcloud_world)
-
-        print(f"Slowdown: {self.get_slowdown(pointcloud_world)}")
-
-        # Add xyz axis to the visualization
-        axis = o3d.geometry.TriangleMesh.create_coordinate_frame(
-            size=0.5, origin=[0, 0, 0]
-        )
-        vis.add_geometry(axis)  # Red axis is x, green axis is y, blue axis is z
-
-        # Get the laser scan from the point cloud
-        laser_scan = self.get_laserscan(
-            pointcloud_world, num_beams=36, max_range=3.0, angle_range=180
-        )
-        self.visualize_laser_scan(vis, laser_scan, angle_range=180, max_range=3.0)
-
-        # Change view position
-        ctr = vis.get_view_control()
-        ctr.set_lookat([0, 0, 0])
-        ctr.set_front(
-            [0, 1, 0]
-        )  # Changed to top-down view for better laserscan visibility
-        ctr.set_up([0, 0, 1])
-
-        # Update the visualization
-        vis.poll_events()
-        vis.update_renderer()
-
-        # Check for user input - exit on 'q' press
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            self.stop_display()
-
-    def stop_display(self):
-        """Stop the display loop"""
-        self.stopped = True
 
 
 def main():
@@ -432,20 +605,15 @@ def main():
 
     camera_intrinsics = camera_params.get("intrinsics")
 
-    # Initialize the PointCloudProcessor
+    # Initialize processors
     pointcloud_processor = PointCloudProcessor(camera_intrinsics)
-
     creature_detector = CreatureDetector(confidence_threshold=0.75)
 
-    # Initialize and start the stream viewer
-    viewer = PointcloudViewer(camera, pointcloud_processor, creature_detector)
+    # Initialize the threaded system
+    system = ThreadedSystem(camera, pointcloud_processor, creature_detector)
 
-    # Profile the start_display method
-    profiler = cProfile.Profile()
-    profiler.enable()
-    viewer.start_display()
-    profiler.disable()
-    profiler.print_stats(sort="cumtime")
+    # Start all threads
+    system.start_threads()
 
 
 if __name__ == "__main__":
