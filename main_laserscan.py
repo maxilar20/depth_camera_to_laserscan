@@ -248,7 +248,7 @@ class PointcloudViewer:
         return line_set
 
     def start_display(self):
-        """Display the camera stream in an Open3D window until 'q' is pressed"""
+        """Display the camera stream in an Open3D window until 'q' is pressed or Ctrl+C is received"""
         # Allow the camera sensor to warm up
         time.sleep(2.0)
 
@@ -260,6 +260,9 @@ class PointcloudViewer:
             # Keep looping until 'q' is pressed
             while not self.stopped:
                 self.update_display(vis)
+        except KeyboardInterrupt:
+            print("Keyboard interrupt received. Stopping display.")
+            self.stop_display()
         finally:
             # Clean up resources
             if hasattr(self.camera_stream, "stop"):
