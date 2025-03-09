@@ -118,6 +118,55 @@ class PointcloudViewer:
 
         return pointcloud
 
+    def get_slowdown(
+        self, pointcloud, max_range=1.5, z_range=(-0.35, 0.35), y_range=(-0.1, 0.1)
+    ):
+        """
+        Generate a boolean slowdown flag based on the minimum distance to obstacles in the x direction
+
+        Args:
+            pointcloud: Open3D pointcloud in world frame
+            max_range: Maximum range of the slowdown map
+            z_range: Range of Z values to consider (min, max)
+            y_range: Range of Y values to consider (min, max)
+
+        Returns:
+            boolean representing the slowdown flag
+        """
+        # Get points as numpy array
+        points = np.asarray(pointcloud.points)
+
+        if len(points) == 0:
+            return False
+
+        # Filter points within the height range (Y-axis)
+        height_mask = (points[:, 1] >= y_range[0]) & (points[:, 1] <= y_range[1])
+        filtered_points = points[height_mask]
+
+        if len(filtered_points) == 0:
+            return False
+
+        # Filter points within the Z range
+        z_mask = (filtered_points[:, 2] >= z_range[0]) & (
+            filtered_points[:, 2] <= z_range[1]
+        )
+        filtered_points = filtered_points[z_mask]
+
+        if len(filtered_points) == 0:
+            return False
+
+        # Calculate distances in the X direction
+        distances = filtered_points[:, 0]
+
+        # Filter points within max_range
+        range_mask = distances <= max_range
+        distances = distances[range_mask]
+
+        if len(distances) == 0:
+            return False
+
+        return True
+
     def get_laserscan(
         self,
         pointcloud,
@@ -334,7 +383,9 @@ class PointcloudViewer:
             rgb_frame, depth_frame
         )
         pointcloud_world = self.transform_pointcloud_to_world(pointcloud)
-        # vis.add_geometry(pointcloud_world)
+        vis.add_geometry(pointcloud_world)
+
+        print(f"Slowdown: {self.get_slowdown(pointcloud_world)}")
 
         # Add xyz axis to the visualization
         axis = o3d.geometry.TriangleMesh.create_coordinate_frame(
