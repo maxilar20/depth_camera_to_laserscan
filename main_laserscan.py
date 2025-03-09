@@ -1,4 +1,5 @@
 import copy
+import cProfile
 import math
 import time
 from pathlib import Path
@@ -33,8 +34,8 @@ class PointcloudViewer:
 
         self.camera_orientation = {
             "yaw": 0,  # Rotation around vertical axis (degrees)
-            "pitch": -90,  # Rotation around lateral axis (degrees) - changed to 0
-            "roll": 0,  # Rotation around longitudinal axis (degrees) - changed to -90
+            "pitch": -90,  # Rotation around lateral axis (degrees)
+            "roll": 0,  # Rotation around longitudinal axis (degrees)
         }
 
         # Build the transformation matrix
@@ -268,9 +269,7 @@ class PointcloudViewer:
 
     def update_display(self, vis):
         # Get the latest frame (RGBD)
-        start_time = time.time()
         rgb_frame, depth_frame = self.camera_stream.read_rgbd()
-        print(f"Time to read frames: {time.time() - start_time:.4f} seconds")
 
         # Check if frames are valid
         if rgb_frame is None or depth_frame is None:
@@ -278,60 +277,42 @@ class PointcloudViewer:
             return  # Skip this iteration if frames are invalid
 
         # Process frames to create pointcloud (in camera coordinates)
-        start_time = time.time()
         pointcloud = self.pointcloud_processor.process_rgbd_image(
             rgb_frame, depth_frame
         )
-        print(f"Time to process frames: {time.time() - start_time:.4f} seconds")
 
         # Transform pointcloud from camera to world coordinates
-        start_time = time.time()
         pointcloud_world = self.transform_pointcloud_to_world(pointcloud)
-        print(f"Time to transform pointcloud: {time.time() - start_time:.4f} seconds")
 
         # Clear the visualizer and update it with the new point cloud
-        start_time = time.time()
         vis.clear_geometries()
         vis.add_geometry(pointcloud_world)
-        print(
-            f"Time to update visualizer with pointcloud: {time.time() - start_time:.4f} seconds"
-        )
 
         # Add xyz axis to the visualization
-        start_time = time.time()
         axis = o3d.geometry.TriangleMesh.create_coordinate_frame(
             size=0.5, origin=[0, 0, 0]
         )
         vis.add_geometry(axis)  # Red axis is x, green axis is y, blue axis is z
-        print(f"Time to add coordinate frame: {time.time() - start_time:.4f} seconds")
 
         # Get the laser scan from the point cloud
-        start_time = time.time()
         laser_scan = self.get_laserscan(
-            pointcloud_world, num_beams=36, max_range=3.0, angle_range=90
+            pointcloud_world, num_beams=36, max_range=3.0, angle_range=180
         )
-        print(f"Time to generate laser scan: {time.time() - start_time:.4f} seconds")
 
         # Visualize the laser scan
-        start_time = time.time()
-        self.visualize_laser_scan(vis, laser_scan, angle_range=90, max_range=3.0)
-        print(f"Time to visualize laser scan: {time.time() - start_time:.4f} seconds")
+        self.visualize_laser_scan(vis, laser_scan, angle_range=180, max_range=3.0)
 
         # Change view position
-        start_time = time.time()
         ctr = vis.get_view_control()
         ctr.set_lookat([0, 0, 0])
         ctr.set_front(
             [0, 1, 0]
         )  # Changed to top-down view for better laserscan visibility
         ctr.set_up([0, 0, 1])
-        print(f"Time to change view position: {time.time() - start_time:.4f} seconds")
 
         # Update the visualization
-        start_time = time.time()
         vis.poll_events()
         vis.update_renderer()
-        print(f"Time to update renderer: {time.time() - start_time:.4f} seconds")
 
         # Check for user input - exit on 'q' press
         key = cv2.waitKey(1) & 0xFF
@@ -359,7 +340,13 @@ def main():
 
     # Initialize and start the stream viewer
     viewer = PointcloudViewer(camera, pointcloud_processor)
+
+    # Profile the start_display method
+    profiler = cProfile.Profile()
+    profiler.enable()
     viewer.start_display()
+    profiler.disable()
+    profiler.print_stats(sort="cumtime")
 
 
 if __name__ == "__main__":
