@@ -1,4 +1,3 @@
-import copy
 import cProfile
 import math
 import time
@@ -10,6 +9,7 @@ import open3d as o3d
 import yaml
 
 from camera_stream import RealSenseStream
+from obstacle_detector import CreatureDetector
 from pointcloud_processor import PointCloudProcessor
 
 
@@ -18,10 +18,12 @@ class PointcloudViewer:
         self,
         camera_stream,
         pointcloud_processor,
+        creature_detector,
         window_name="Live Stream",
     ):
         self.camera_stream = camera_stream
         self.pointcloud_processor = pointcloud_processor
+        self.creature_detector = creature_detector
         self.window_name = window_name
         self.stopped = False
 
@@ -110,13 +112,11 @@ class PointcloudViewer:
         Returns:
             Open3D pointcloud in world frame
         """
-        # Create a copy of the input pointcloud
-        pointcloud_world = copy.copy(pointcloud)
 
         # Apply the transformation matrix
-        pointcloud_world.transform(self.camera_to_world)
+        pointcloud.transform(self.camera_to_world)
 
-        return pointcloud_world
+        return pointcloud
 
     def get_laserscan(
         self,
@@ -247,6 +247,50 @@ class PointcloudViewer:
 
         return line_set
 
+    def visualize_creatures(self, vis, detections):
+        """
+        Visualize the detected creatures as bounding boxes in the 3D scene
+
+        Args:
+            vis: Open3D visualizer
+            detections: List of detected creatures
+        """
+        # Create a line set for visualization
+        points = []
+        lines = []
+        colors = []
+
+        # For each detected creature
+        for detection in detections:
+            box = detection["box"]
+            position = detection["position"]
+
+            # Calculate the center of the bounding box
+            center_x = (box[0] + box[2]) // 2
+            center_y = (box[1] + box[3]) // 2
+
+            # Add the center point
+            points.append([position["x"], position["y"], position["z"]])
+
+            # Add a line from the center to the top of the bounding box
+            lines.append([len(points) - 1, len(points)])
+            points.append([position["x"], position["y"], position["z"] + 0.1])
+
+            # Color based on class
+            if detection["class"] == "person":
+                colors.append([1, 0, 0])
+            elif detection["class"] == "dog":
+                colors.append([0, 1, 0])
+            else:
+                colors.append([0, 0, 1])
+
+            # Add sphere at the center of the bounding box
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
+            sphere.compute_vertex_normals()
+            sphere.translate([position["z"], 0, position["x"]])
+            sphere.paint_uniform_color([0.5, 0.5, 0.5])
+            vis.add_geometry(sphere)
+
     def start_display(self):
         """Display the camera stream in an Open3D window until 'q' is pressed or Ctrl+C is received"""
         # Allow the camera sensor to warm up
@@ -279,17 +323,18 @@ class PointcloudViewer:
             print("Error: Empty frame received from the camera.")
             return  # Skip this iteration if frames are invalid
 
+        vis.clear_geometries()
+
+        # Detect creatures in the pointcloud
+        detections = self.creature_detector.detect(rgb_frame, depth_frame)
+        self.visualize_creatures(vis, detections)
+
         # Process frames to create pointcloud (in camera coordinates)
         pointcloud = self.pointcloud_processor.process_rgbd_image(
             rgb_frame, depth_frame
         )
-
-        # Transform pointcloud from camera to world coordinates
         pointcloud_world = self.transform_pointcloud_to_world(pointcloud)
-
-        # Clear the visualizer and update it with the new point cloud
-        vis.clear_geometries()
-        vis.add_geometry(pointcloud_world)
+        # vis.add_geometry(pointcloud_world)
 
         # Add xyz axis to the visualization
         axis = o3d.geometry.TriangleMesh.create_coordinate_frame(
@@ -301,8 +346,6 @@ class PointcloudViewer:
         laser_scan = self.get_laserscan(
             pointcloud_world, num_beams=36, max_range=3.0, angle_range=180
         )
-
-        # Visualize the laser scan
         self.visualize_laser_scan(vis, laser_scan, angle_range=180, max_range=3.0)
 
         # Change view position
@@ -341,8 +384,10 @@ def main():
     # Initialize the PointCloudProcessor
     pointcloud_processor = PointCloudProcessor(camera_intrinsics)
 
+    creature_detector = CreatureDetector(confidence_threshold=0.75)
+
     # Initialize and start the stream viewer
-    viewer = PointcloudViewer(camera, pointcloud_processor)
+    viewer = PointcloudViewer(camera, pointcloud_processor, creature_detector)
 
     # Profile the start_display method
     profiler = cProfile.Profile()
