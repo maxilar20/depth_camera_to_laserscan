@@ -8,9 +8,9 @@ import numpy as np
 import open3d as o3d
 import yaml
 
-from camera_stream import RealSenseStream
-from obstacle_detector import CreatureDetector
-from pointcloud_processor import PointCloudProcessor
+from include.camera_stream import RealSenseStream
+from include.obstacle_detector import CreatureDetector
+from include.pointcloud_processor import PointCloudProcessor
 
 
 class SharedData:

@@ -7,8 +7,8 @@ import numpy as np
 import open3d as o3d
 import yaml
 
-from camera_stream import RealSenseStream
-from pointcloud_processor import PointCloudProcessor
+from include.camera_stream import RealSenseStream
+from include.pointcloud_processor import PointCloudProcessor
 
 
 class PointcloudViewer:
@@ -272,10 +272,13 @@ class PointcloudViewer:
         # Red axis is x, green axis is y, blue axis is z
 
         # Change view position
-        ctr = vis.get_view_control()
-        ctr.set_lookat([0, 0, 0])
-        ctr.set_front([1, 1, -1])
-        ctr.set_up([0, 1, 0])
+        try:
+            ctr = vis.get_view_control()
+            ctr.set_lookat([0, 0, 0])
+            ctr.set_front([1, 1, -1])
+            ctr.set_up([0, 1, 0])
+        except Exception as e:
+            print(f"Error setting view control: {e}")
 
         # Update the visualization
         vis.poll_events()

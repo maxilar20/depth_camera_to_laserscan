@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import yaml
 
-from camera_stream import RealSenseStream
+from include.camera_stream import RealSenseStream
 
 
 class CameraIntrinsicCalibrator:
