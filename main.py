@@ -141,6 +141,8 @@ class PointcloudViewer:
         vis = o3d.visualization.Visualizer()
         vis.create_window(window_name=self.window_name)
 
+        print(vis)
+
         try:
             # Keep looping until 'q' is pressed
             while not self.stopped:
@@ -151,62 +153,6 @@ class PointcloudViewer:
                 self.camera_stream.stop()
             vis.destroy_window()
             print("Camera resources released")
-
-    def compute_heightmap(self, pointcloud, rectangle_coords, rectangle_size=0.025):
-        # Extract the rectangle coordinates
-        x_min, x_max, z_min, z_max = rectangle_coords
-
-        # Convert pointcloud to numpy array
-        points = np.asarray(pointcloud.points)
-
-        # Create height map dimensions
-        height_map_width = int((x_max - x_min) / rectangle_size)
-        height_map_height = int((z_max - z_min) / rectangle_size)
-        height_map_array = np.zeros((height_map_width, height_map_height))
-
-        # Filter points within rectangle bounds
-        mask = (
-            (points[:, 0] >= x_min)
-            & (points[:, 0] <= x_max)
-            & (points[:, 2] >= z_min)
-            & (points[:, 2] <= z_max)
-        )
-        valid_points = points[mask]
-
-        if len(valid_points) > 0:
-            # Calculate indices for each valid point
-            x_indices = np.floor((valid_points[:, 0] - x_min) / rectangle_size).astype(
-                int
-            )
-            z_indices = np.floor((valid_points[:, 2] - z_min) / rectangle_size).astype(
-                int
-            )
-
-            # Clip indices to prevent out-of-bounds access
-            x_indices = np.clip(x_indices, 0, height_map_width - 1)
-            z_indices = np.clip(z_indices, 0, height_map_height - 1)
-
-            # Assign heights to the height map, taking the maximum height at each cell
-            for i in range(len(valid_points)):
-                x_idx, z_idx = x_indices[i], z_indices[i]
-                height_map_array[x_idx, z_idx] = max(
-                    height_map_array[x_idx, z_idx], valid_points[i, 1]
-                )
-
-        return height_map_array
-
-    def gradient_image(self, image):
-        # Compute the gradient in x and y directions
-        grad_x = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=3)
-
-        # Compute the magnitude of the gradient
-        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
-
-        # Normalize the gradient magnitude
-        grad_mag = cv2.normalize(grad_mag, None, 0, 255, cv2.NORM_MINMAX)
-
-        return grad_mag
 
     def update_display(self, vis):
         # Get the latest frame (RGBD)
@@ -231,38 +177,6 @@ class PointcloudViewer:
         # Add the point cloud
         vis.add_geometry(pointcloud_world)
 
-        # Compute the heightmap
-        min_x, max_x = -0.5, 0.5
-        min_z, max_z = -0.5, 0.5
-        rectangle_coords = (min_x, max_x, min_z, max_z)
-        height_map_array = self.compute_heightmap(pointcloud_world, rectangle_coords)
-
-        # Compute the gradient of the height map
-        gradient_image = self.gradient_image(height_map_array)
-        gradient_image = cv2.resize(gradient_image, (750, 750))
-        gradient_image = cv2.normalize(
-            gradient_image, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
-        )
-
-        threshold = 75
-        _, threshold_image = cv2.threshold(
-            gradient_image, threshold, 255, cv2.THRESH_BINARY
-        )
-        cv2.imshow("Threshold Image", threshold_image)
-
-        # Display the gradient image
-        cv2.imshow("Gradient Image", gradient_image)
-
-        # Normalize the height map
-        height_map_array = cv2.normalize(
-            height_map_array, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
-        )
-
-        # Resize the height map for better visualization
-        height_map_array = cv2.resize(height_map_array, (750, 750))
-
-        # Display the height map
-        cv2.imshow("Height Map", height_map_array)
 
         # Add xyz axis to the visualization
         axis = o3d.geometry.TriangleMesh.create_coordinate_frame(
