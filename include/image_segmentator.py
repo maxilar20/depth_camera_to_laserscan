@@ -9,7 +9,7 @@ from torchvision.models.segmentation import deeplabv3_resnet101
 
 
 class FloorSegmentation:
-    def __init__(self, model_path=None, use_cpu=False, max_image_size=None):
+    def __init__(self, model_path=None, use_cpu=False, max_image_size=None, target_class_id=None, debug=False):
         # Initialize device based on parameters and availability
         if use_cpu:
             self.device = torch.device('cpu')
@@ -33,10 +33,24 @@ class FloorSegmentation:
 
         # Store the maximum image size for resizing large images
         self.max_image_size = max_image_size
+        self.debug = debug
 
-        # ADE20K dataset where floor is class 3 (zero-indexed)
-        # Adjust this based on the dataset used for training
-        self.floor_class_id = 3
+        # In the DeepLabV3 model, these classes correspond to:
+        # 0-background, 1-aeroplane, ..., 15-person, ..., etc.
+        # See the full list at torchvision documentation for the model
+        self.class_names = [
+            'background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle',
+            'bus', 'car', 'cat', 'chair', 'cow', 'dining table', 'dog', 'horse',
+            'motorbike', 'person', 'potted plant', 'sheep', 'sofa', 'train',
+            'tv/monitor', 'grass', 'ground', 'road', 'floor'
+        ]
+
+        # Default target class is floor (index depends on model)
+        # For COCO+VOC labels, floor is usually around index 3-5
+        # For ADE20K dataset, floor is index 3
+        # For custom models, this may vary
+        self.target_class_id = target_class_id if target_class_id is not None else 3
+        print(f"Targeting class ID: {self.target_class_id}")
 
         # Image transformation pipeline
         self.transform = T.Compose([
@@ -97,25 +111,68 @@ class FloorSegmentation:
             # Get segmentation map
             segmentation = torch.argmax(output, dim=0).cpu().numpy()
 
-            # Create mask where floor is False (to be removed)
-            floor_mask = segmentation != self.floor_class_id
+            # Debug: Display unique classes found in the image
+            if self.debug:
+                unique_classes = np.unique(segmentation)
+                print(f"Detected classes: {unique_classes}")
+                for class_id in unique_classes:
+                    class_name = self.class_names[class_id] if class_id < len(self.class_names) else f"Unknown ({class_id})"
+                    class_pixels = np.sum(segmentation == class_id)
+                    percent = 100 * class_pixels / segmentation.size
+                    print(f"  Class {class_id} ({class_name}): {percent:.2f}% of image")
+
+            # Create mask where target class is False (to be removed)
+            target_mask = segmentation != self.target_class_id
+
+            # If no target class pixels were found, try a different approach
+            if np.all(target_mask) and self.debug:
+                print(f"Warning: No pixels of class {self.target_class_id} found in the image.")
+
+                # Try to find a class that might be the floor/ground
+                for potential_id in [3, 4, 5, 9, 11, 22, 23, 24]:
+                    if potential_id in np.unique(segmentation):
+                        print(f"Suggestion: Try using class {potential_id} instead (found in image)")
 
             # If the image was resized, resize the mask back to the original size
             if original_size != current_size:
-                floor_mask = cv2.resize(
-                    floor_mask.astype(np.uint8),
+                target_mask = cv2.resize(
+                    target_mask.astype(np.uint8),
                     (original_size[1], original_size[0]),
                     interpolation=cv2.INTER_NEAREST
                 ).astype(bool)
 
+            # Create a color-coded segmentation image for debugging
+            if self.debug:
+                # Create a colorful visualization of all segmentation classes
+                segmentation_vis = np.zeros((*original_size, 3), dtype=np.uint8)
+                for class_id in np.unique(segmentation):
+                    # Generate a random color for each class
+                    color = np.random.randint(0, 255, 3).tolist()
+                    mask = cv2.resize(
+                        (segmentation == class_id).astype(np.uint8),
+                        (original_size[1], original_size[0]),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                    segmentation_vis[mask == 1] = color
+
+                # Save this visualization
+                cv2.imwrite("segmentation_classes.jpg", segmentation_vis)
+                print("Saved class visualization to segmentation_classes.jpg")
+
             # Convert mask to 3 channels for multiplication with RGB image
-            floor_mask_3ch = np.stack([floor_mask] * 3, axis=2)
+            target_mask_3ch = np.stack([target_mask] * 3, axis=2)
+            if original_size != current_size:
+                target_mask_3ch = np.stack([cv2.resize(
+                    target_mask.astype(np.uint8),
+                    (original_size[1], original_size[0]),
+                    interpolation=cv2.INTER_NEAREST
+                )] * 3, axis=2).astype(bool)
 
             # Remove floor from image by setting floor pixels to black
             result_image = original_image.copy()
-            result_image[~floor_mask_3ch] = 0
+            result_image[~target_mask_3ch] = 0
 
-            return result_image, floor_mask
+            return result_image, target_mask
 
         except torch.cuda.OutOfMemoryError as e:
             if self.device.type == 'cuda':
@@ -165,6 +222,8 @@ def main():
     parser.add_argument('--show', action='store_true', help='Display the results')
     parser.add_argument('--cpu', action='store_true', help='Force CPU processing (slower but uses less memory)')
     parser.add_argument('--max-size', type=int, default=1024, help='Maximum image dimension for processing')
+    parser.add_argument('--class-id', type=int, help='Class ID to remove (default is 3 for floor)')
+    parser.add_argument('--debug', action='store_true', help='Enable debug output')
     args = parser.parse_args()
 
     # Check if input file exists
@@ -173,8 +232,13 @@ def main():
         return
 
     try:
-        # Initialize the segmentation model
-        segmentor = FloorSegmentation(use_cpu=args.cpu, max_image_size=args.max_size)
+        # Initialize the segmentation model with updated parameters
+        segmentor = FloorSegmentation(
+            use_cpu=args.cpu,
+            max_image_size=args.max_size,
+            target_class_id=args.class_id,
+            debug=args.debug
+        )
 
         # Load image
         print(f"Loading image from {args.input}")
