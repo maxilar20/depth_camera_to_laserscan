@@ -141,8 +141,6 @@ class PointcloudViewer:
         vis = o3d.visualization.Visualizer()
         vis.create_window(window_name=self.window_name)
 
-        print(vis)
-
         try:
             # Keep looping until 'q' is pressed
             while not self.stopped:
